@@ -32,6 +32,14 @@ logging.basicConfig(
 )
 log = logging.getLogger("http_proxy")
 
+# Dedicated logger for all proxy hosts/calls (append-only, one line per request)
+_hosts_handler = logging.FileHandler(os.path.join(LOG_DIR, "proxy_hosts.log"))
+_hosts_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+hosts_log = logging.getLogger("proxy_hosts")
+hosts_log.addHandler(_hosts_handler)
+hosts_log.setLevel(logging.INFO)
+hosts_log.propagate = False
+
 LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = 18080
 
@@ -69,7 +77,9 @@ class DiagnosticProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_CONNECT(self):
         """Handle HTTPS CONNECT tunneling."""
         target = self.path
+        host = target.split(":")[0]
         log.info("CONNECT %s from %s", target, self.address_string())
+        hosts_log.info("CONNECT host=%s target=%s client=%s", host, target, self.address_string())
         start = time.monotonic()
 
         try:
@@ -95,6 +105,7 @@ class DiagnosticProxyHandler(http.server.BaseHTTPRequestHandler):
                 if status_code != 200:
                     elapsed = (time.monotonic() - start) * 1000
                     log.warning("CONNECT %s FAILED upstream=%s (%.0fms)", target, status_line, elapsed)
+                    hosts_log.info("CONNECT host=%s status=FAILED upstream=%s elapsed=%.0fms", host, status_line, elapsed)
                     self.send_error(502, f"Upstream proxy refused: {status_line}")
                     upstream.close()
                     return
@@ -106,6 +117,7 @@ class DiagnosticProxyHandler(http.server.BaseHTTPRequestHandler):
             # Tunnel established
             elapsed = (time.monotonic() - start) * 1000
             log.info("CONNECT %s OK (%.0fms)", target, elapsed)
+            hosts_log.info("CONNECT host=%s status=OK elapsed=%.0fms", host, elapsed)
             self.send_response(200, "Connection Established")
             self.end_headers()
 
@@ -116,6 +128,7 @@ class DiagnosticProxyHandler(http.server.BaseHTTPRequestHandler):
         except Exception as e:
             elapsed = (time.monotonic() - start) * 1000
             log.error("CONNECT %s ERROR: %s (%.0fms)", target, e, elapsed)
+            hosts_log.info("CONNECT host=%s status=ERROR error=%s elapsed=%.0fms", host, e, elapsed)
             self.send_error(502, str(e))
 
     def _tunnel(self, client, remote):
@@ -143,7 +156,10 @@ class DiagnosticProxyHandler(http.server.BaseHTTPRequestHandler):
     def _proxy_request(self):
         """Forward an HTTP request (GET, POST, etc.)."""
         url = self.path
+        parsed_url = urllib.parse.urlparse(url)
+        req_host = parsed_url.hostname or url
         log.info("%s %s from %s", self.command, url, self.address_string())
+        hosts_log.info("%s host=%s url=%s client=%s", self.command, req_host, url, self.address_string())
         start = time.monotonic()
 
         content_length = int(self.headers.get("Content-Length", 0))
@@ -173,6 +189,8 @@ class DiagnosticProxyHandler(http.server.BaseHTTPRequestHandler):
 
             log.info("%s %s -> %d (%d bytes, %.0fms)",
                      self.command, url, resp.status, len(resp_body), elapsed)
+            hosts_log.info("%s host=%s status=%d bytes=%d elapsed=%.0fms",
+                           self.command, req_host, resp.status, len(resp_body), elapsed)
 
             self.send_response(resp.status)
             for key, val in resp.getheaders():
@@ -186,6 +204,7 @@ class DiagnosticProxyHandler(http.server.BaseHTTPRequestHandler):
         except Exception as e:
             elapsed = (time.monotonic() - start) * 1000
             log.error("%s %s ERROR: %s (%.0fms)", self.command, url, e, elapsed)
+            hosts_log.info("%s host=%s status=ERROR error=%s elapsed=%.0fms", self.command, req_host, e, elapsed)
             self.send_error(502, str(e))
 
     do_GET = _proxy_request

@@ -36,6 +36,14 @@ logging.basicConfig(
 )
 log = logging.getLogger("dns_server")
 
+# Dedicated logger for all DNS queries (append-only, one line per query)
+_queries_handler = logging.FileHandler(os.path.join(LOG_DIR, "dns_queries.log"))
+_queries_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+queries_log = logging.getLogger("dns_queries")
+queries_log.addHandler(_queries_handler)
+queries_log.setLevel(logging.INFO)
+queries_log.propagate = False
+
 LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = 15353
 
@@ -233,6 +241,7 @@ def handle_query(server_sock, data, client_addr):
     qtype_name = QTYPES.get(qtype, str(qtype)) if qtype else "?"
 
     log.info("QUERY %s %s from %s:%d", qtype_name, qname, *client_addr)
+    queries_log.info("QUERY type=%s name=%s client=%s:%d", qtype_name, qname, *client_addr)
     start = time.monotonic()
 
     # First try direct UDP (fast path, may not work in all environments)
@@ -244,6 +253,8 @@ def handle_query(server_sock, data, client_addr):
         answers = header["ancount"] if header else 0
         log.info("REPLY %s %s -> %s (%d answers, via=%s, %.0fms)",
                  qtype_name, qname, rcode, answers, source, elapsed)
+        queries_log.info("REPLY type=%s name=%s rcode=%s answers=%d via=%s elapsed=%.0fms",
+                         qtype_name, qname, rcode, answers, source, elapsed)
         server_sock.sendto(response, client_addr)
         return
 
@@ -256,6 +267,8 @@ def handle_query(server_sock, data, client_addr):
         # We can't get the actual IP from the proxy, but we confirm the name is valid
         log.info("REPLY %s %s -> NOERROR (proxy-resolved, http=%s, %.0fms)",
                  qtype_name, qname, status, elapsed)
+        queries_log.info("REPLY type=%s name=%s rcode=NOERROR via=proxy http_status=%s elapsed=%.0fms",
+                         qtype_name, qname, status, elapsed)
         # Synthesize a response: return 127.0.0.2 as a sentinel indicating
         # "resolved via proxy" — the actual connection should go through the proxy
         if qtype == 1:  # A record
@@ -271,6 +284,8 @@ def handle_query(server_sock, data, client_addr):
     else:
         log.error("REPLY %s %s -> SERVFAIL (proxy-error=%s, %.0fms)",
                   qtype_name, qname, status, elapsed)
+        queries_log.info("REPLY type=%s name=%s rcode=SERVFAIL via=proxy error=%s elapsed=%.0fms",
+                         qtype_name, qname, status, elapsed)
         resp = build_servfail(data, qname, qtype)
         server_sock.sendto(resp, client_addr)
 
